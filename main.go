@@ -136,7 +136,7 @@ func parseFlagsFrom(fs *flag.FlagSet, args []string) (config, error) {
 	fs.IntVar(&cfg.limit, "limit", 5, "max videos to download for channel")
 	fs.IntVar(&cfg.sleepSeconds, "sleep-seconds", 5, "sleep seconds between downloads")
 	fs.StringVar(&cfg.jsRuntime, "js-runtime", "auto", "JS runtime passed to yt-dlp (auto,node,deno,...)")
-	fs.StringVar(&cfg.format, "format", "auto", "yt-dlp format selector (auto picks best available for the environment)")
+	fs.StringVar(&cfg.format, "format", "auto", "yt-dlp format selector (auto prefers mp4 when available)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -215,9 +215,9 @@ func determineFormat(selection string) (string, string) {
 		return value, ""
 	}
 	if hasExecutable("ffmpeg") {
-		return "bv*+ba/b", ""
+		return "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]/b[ext=mp4]/bv*+ba/b", ""
 	}
-	return "", "ffmpeg not found; falling back to single-stream downloads. Install ffmpeg for merged video+audio output."
+	return "b[ext=mp4]/b", "ffmpeg not found; falling back to single-stream downloads. Install ffmpeg for merged video+audio output."
 }
 
 func hasExecutable(name string) bool {

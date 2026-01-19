@@ -55,14 +55,21 @@ func (d *ytDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 		"--no-warnings",
 		"--no-simulate",
 		"--remote-components", "ejs:github",
-		"--print", "after_move:filepath",
 		"-o", outputTemplate,
+	}
+	if hasExecutable("ffmpeg") {
+		baseArgs = append(baseArgs, "--print", "after_postprocess:filepath")
+	} else {
+		baseArgs = append(baseArgs, "--print", "after_move:filepath")
 	}
 	if jsRuntime != "" {
 		baseArgs = append(baseArgs, "--js-runtimes", jsRuntime)
 	}
 	if format != "" {
 		baseArgs = append(baseArgs, "--format", format)
+	}
+	if hasExecutable("ffmpeg") {
+		baseArgs = append(baseArgs, "--merge-output-format", "mp4", "--recode-video", "mp4")
 	}
 	if d.sleep > 0 {
 		baseArgs = append(baseArgs,
