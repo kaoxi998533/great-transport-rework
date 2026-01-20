@@ -1,9 +1,13 @@
-package main
+package app
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,11 +19,15 @@ type Downloader interface {
 	DownloadVideo(ctx context.Context, videoURL, outputDir string, jsRuntime, format string) ([]string, error)
 }
 
-type ytDlpDownloader struct {
+type YtDlpDownloader struct {
 	sleep time.Duration
 }
 
-func (d *ytDlpDownloader) ListChannelVideoIDs(ctx context.Context, channelURL string, limit int, jsRuntime string) ([]string, error) {
+func NewYtDlpDownloader(sleep time.Duration) *YtDlpDownloader {
+	return &YtDlpDownloader{sleep: sleep}
+}
+
+func (d *YtDlpDownloader) ListChannelVideoIDs(ctx context.Context, channelURL string, limit int, jsRuntime string) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be > 0")
 	}
@@ -48,7 +56,7 @@ func (d *ytDlpDownloader) ListChannelVideoIDs(ctx context.Context, channelURL st
 	return ids, nil
 }
 
-func (d *ytDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir string, jsRuntime, format string) ([]string, error) {
+func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir string, jsRuntime, format string) ([]string, error) {
 	outputTemplate := filepath.Join(outputDir, "%(title)s.%(ext)s")
 	baseArgs := []string{
 		"--quiet",
@@ -57,7 +65,7 @@ func (d *ytDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 		"--remote-components", "ejs:github",
 		"-o", outputTemplate,
 	}
-	if hasExecutable("ffmpeg") {
+	if HasExecutable("ffmpeg") {
 		baseArgs = append(baseArgs, "--print", "after_postprocess:filepath")
 	} else {
 		baseArgs = append(baseArgs, "--print", "after_move:filepath")
@@ -68,7 +76,7 @@ func (d *ytDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 	if format != "" {
 		baseArgs = append(baseArgs, "--format", format)
 	}
-	if hasExecutable("ffmpeg") {
+	if HasExecutable("ffmpeg") {
 		baseArgs = append(baseArgs, "--merge-output-format", "mp4", "--recode-video", "mp4")
 	}
 	if d.sleep > 0 {
@@ -112,4 +120,58 @@ func runYtDlpLines(ctx context.Context, args []string) ([]string, error) {
 		}
 	}
 	return lines, nil
+}
+
+type ytDlpResult struct {
+	files  []string
+	stderr string
+}
+
+func runYtDlp(ctx context.Context, args []string) (ytDlpResult, error) {
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return ytDlpResult{}, err
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+
+	if err := cmd.Start(); err != nil {
+		return ytDlpResult{}, err
+	}
+
+	var files []string
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return ytDlpResult{files: files, stderr: stderrBuf.String()}, scanErr
+	}
+	if err := cmd.Wait(); err != nil {
+		return ytDlpResult{files: files, stderr: stderrBuf.String()}, err
+	}
+	return ytDlpResult{files: files, stderr: stderrBuf.String()}, nil
+}
+
+func shouldRetryWithDynamic(stderr string, runErr error) bool {
+	if stderr == "" && runErr == nil {
+		return false
+	}
+	patterns := []string{
+		"fragment not found",
+		"Retrying fragment",
+		"SABR streaming",
+		"Some web client https formats have been skipped",
+		"HTTP Error 403",
+	}
+	for _, p := range patterns {
+		if strings.Contains(stderr, p) {
+			return true
+		}
+	}
+	return false
 }

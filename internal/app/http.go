@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -21,7 +21,7 @@ type syncResponse struct {
 	Error      string `json:"error,omitempty"`
 }
 
-func serveHTTP(addr string, controller *Controller) error {
+func ServeHTTP(addr string, controller *Controller) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -15,11 +15,15 @@ type SyncResult struct {
 
 type Controller struct {
 	Downloader Downloader
-	Uploader   uploader
+	Uploader   Uploader
 	Store      *SQLiteStore
 	OutputDir  string
 	JSRuntime  string
 	Format     string
+}
+
+type Uploader interface {
+	Upload(path string) error
 }
 
 func (c *Controller) SyncChannel(ctx context.Context, channelID string, limit int) (SyncResult, error) {

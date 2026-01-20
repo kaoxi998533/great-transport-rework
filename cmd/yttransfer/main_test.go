@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"great_transport/internal/app"
 )
 
 func TestParseFlagsFrom(t *testing.T) {
@@ -107,44 +109,9 @@ func TestParseFlagsFrom(t *testing.T) {
 	}
 }
 
-func TestChannelURL(t *testing.T) {
-	if got := channelURL("https://example.com/channel/abc"); got != "https://example.com/channel/abc" {
-		t.Fatalf("expected passthrough for URL, got %s", got)
-	}
-	if got := channelURL("UCxyz"); got != "https://www.youtube.com/channel/UCxyz/videos" {
-		t.Fatalf("unexpected channel URL: %s", got)
-	}
-}
-
-func TestVideoURL(t *testing.T) {
-	if got := videoURL("https://youtu.be/abc"); got != "https://youtu.be/abc" {
-		t.Fatalf("expected passthrough for URL, got %s", got)
-	}
-	if got := videoURL("123"); got != "https://www.youtube.com/watch?v=123" {
-		t.Fatalf("unexpected video URL: %s", got)
-	}
-}
-
-func TestLooksLikeURL(t *testing.T) {
-	cases := []struct {
-		input string
-		want  bool
-	}{
-		{"https://example.com", true},
-		{"http://example.com", true},
-		{"ftp://example.com", false},
-		{"example.com", false},
-	}
-	for _, c := range cases {
-		if got := looksLikeURL(c.input); got != c.want {
-			t.Fatalf("looksLikeURL(%q)=%v, want %v", c.input, got, c.want)
-		}
-	}
-}
-
 func TestResolveJSRuntime(t *testing.T) {
-	restore := lookPath
-	t.Cleanup(func() { lookPath = restore })
+	restore := app.LookPath
+	t.Cleanup(func() { app.LookPath = restore })
 
 	tests := []struct {
 		name      string
@@ -160,7 +127,7 @@ func TestResolveJSRuntime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lookPath = func(name string) (string, error) {
+			app.LookPath = func(name string) (string, error) {
 				if tt.available[name] {
 					return "/usr/bin/" + name, nil
 				}
@@ -184,8 +151,8 @@ func TestResolveJSRuntime(t *testing.T) {
 }
 
 func TestDetermineFormat(t *testing.T) {
-	restore := lookPath
-	t.Cleanup(func() { lookPath = restore })
+	restore := app.LookPath
+	t.Cleanup(func() { app.LookPath = restore })
 
 	tests := []struct {
 		name      string
@@ -202,7 +169,7 @@ func TestDetermineFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lookPath = func(name string) (string, error) {
+			app.LookPath = func(name string) (string, error) {
 				if tt.available[name] {
 					return "/usr/bin/" + name, nil
 				}

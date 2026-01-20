@@ -1,23 +1,21 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"great_transport/internal/app"
 )
 
 var (
-	lookPath        = exec.LookPath
 	ytDlpHelpRun    = func() ([]byte, error) { return exec.Command("yt-dlp", "--help").CombinedOutput() }
 	jsFlagOnce      sync.Once
 	jsFlagSupported bool
@@ -37,10 +35,6 @@ type config struct {
 	format       string
 }
 
-type uploader interface {
-	Upload(path string) error
-}
-
 type dummyUploader struct {
 	platform string
 }
@@ -58,7 +52,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := lookPath("yt-dlp"); err != nil {
+	if _, err := app.LookPath("yt-dlp"); err != nil {
 		log.Fatal("yt-dlp not found in PATH; install it first (see README for Docker setup)")
 	}
 
@@ -79,7 +73,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	store, err := NewSQLiteStore(cfg.dbPath)
+	store, err := app.NewSQLiteStore(cfg.dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -87,11 +81,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	downloader := &ytDlpDownloader{
-		sleep: time.Duration(cfg.sleepSeconds) * time.Second,
-	}
+	downloader := app.NewYtDlpDownloader(time.Duration(cfg.sleepSeconds) * time.Second)
 	up := dummyUploader{platform: cfg.platform}
-	controller := &Controller{
+	controller := &app.Controller{
 		Downloader: downloader,
 		Uploader:   up,
 		Store:      store,
@@ -101,7 +93,7 @@ func main() {
 	}
 
 	if cfg.httpAddr != "" {
-		if err := serveHTTP(cfg.httpAddr, controller); err != nil {
+		if err := app.ServeHTTP(cfg.httpAddr, controller); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -194,7 +186,7 @@ func resolveJSRuntime(preferred string) (string, error) {
 		candidates = []string{"node", "deno"}
 	}
 	for _, candidate := range candidates {
-		if hasExecutable(candidate) {
+		if app.HasExecutable(candidate) {
 			return candidate, nil
 		}
 	}
@@ -209,23 +201,15 @@ func runtimePrefIsAuto(value string) bool {
 func determineFormat(selection string) (string, string) {
 	value := strings.TrimSpace(selection)
 	if value != "" && value != "auto" {
-		if strings.Contains(value, "+") && !hasExecutable("ffmpeg") {
+		if strings.Contains(value, "+") && !app.HasExecutable("ffmpeg") {
 			return value, "ffmpeg not found; yt-dlp may fail to merge formats requested via --format"
 		}
 		return value, ""
 	}
-	if hasExecutable("ffmpeg") {
+	if app.HasExecutable("ffmpeg") {
 		return "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]/b[ext=mp4]/bv*+ba/b", ""
 	}
 	return "b[ext=mp4]/b", "ffmpeg not found; falling back to single-stream downloads. Install ffmpeg for merged video+audio output."
-}
-
-func hasExecutable(name string) bool {
-	if name == "" {
-		return false
-	}
-	_, err := lookPath(name)
-	return err == nil
 }
 
 func jsRuntimeFlagSupported() (bool, error) {
@@ -238,76 +222,4 @@ func jsRuntimeFlagSupported() (bool, error) {
 		jsFlagSupported = strings.Contains(string(out), "--js-runtimes")
 	})
 	return jsFlagSupported, jsFlagErr
-}
-
-func channelURL(input string) string {
-	if looksLikeURL(input) {
-		return input
-	}
-	return fmt.Sprintf("https://www.youtube.com/channel/%s/videos", input)
-}
-
-func videoURL(input string) string {
-	if looksLikeURL(input) {
-		return input
-	}
-	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", input)
-}
-
-func looksLikeURL(input string) bool {
-	return strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://")
-}
-
-type ytDlpResult struct {
-	files  []string
-	stderr string
-}
-
-func runYtDlp(ctx context.Context, args []string) (ytDlpResult, error) {
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return ytDlpResult{}, err
-	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
-
-	if err := cmd.Start(); err != nil {
-		return ytDlpResult{}, err
-	}
-
-	var files []string
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	if scanErr := scanner.Err(); scanErr != nil {
-		return ytDlpResult{files: files, stderr: stderrBuf.String()}, scanErr
-	}
-	if err := cmd.Wait(); err != nil {
-		return ytDlpResult{files: files, stderr: stderrBuf.String()}, err
-	}
-	return ytDlpResult{files: files, stderr: stderrBuf.String()}, nil
-}
-
-func shouldRetryWithDynamic(stderr string, runErr error) bool {
-	if stderr == "" && runErr == nil {
-		return false
-	}
-	patterns := []string{
-		"fragment not found",
-		"Retrying fragment",
-		"SABR streaming",
-		"Some web client https formats have been skipped",
-		"HTTP Error 403",
-	}
-	for _, p := range patterns {
-		if strings.Contains(stderr, p) {
-			return true
-		}
-	}
-	return false
 }
