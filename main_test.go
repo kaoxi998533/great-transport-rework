@@ -23,6 +23,8 @@ func TestParseFlagsFrom(t *testing.T) {
 				videoID:      "abc123",
 				platform:     "bilibili",
 				outputDir:    "downloads",
+				dbPath:       "metadata.db",
+				httpAddr:     "",
 				limit:        5,
 				sleepSeconds: 5,
 				jsRuntime:    "auto",
@@ -36,6 +38,8 @@ func TestParseFlagsFrom(t *testing.T) {
 				channelID:    "UC123",
 				platform:     "tiktok",
 				outputDir:    "out",
+				dbPath:       "metadata.db",
+				httpAddr:     "",
 				limit:        3,
 				sleepSeconds: 7,
 				jsRuntime:    "auto",
@@ -45,6 +49,20 @@ func TestParseFlagsFrom(t *testing.T) {
 		{
 			name:    "missing id",
 			wantErr: "provide either --channel-id or --video-id",
+		},
+		{
+			name: "http server without ids",
+			args: []string{"--http-addr", ":8080"},
+			want: config{
+				platform:     "bilibili",
+				outputDir:    "downloads",
+				dbPath:       "metadata.db",
+				httpAddr:     ":8080",
+				limit:        5,
+				sleepSeconds: 5,
+				jsRuntime:    "auto",
+				format:       "auto",
+			},
 		},
 		{
 			name:    "both ids",
@@ -176,8 +194,8 @@ func TestDetermineFormat(t *testing.T) {
 		wantFmt   string
 		wantWarn  string
 	}{
-		{"auto with ffmpeg", "auto", map[string]bool{"ffmpeg": true}, "bv*+ba/b", ""},
-		{"auto no ffmpeg", "auto", map[string]bool{}, "", "falling back"},
+		{"auto with ffmpeg", "auto", map[string]bool{"ffmpeg": true}, "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]/b[ext=mp4]/bv*+ba/b", ""},
+		{"auto no ffmpeg", "auto", map[string]bool{}, "b[ext=mp4]/b", "falling back"},
 		{"custom without merge", "bestaudio", map[string]bool{}, "bestaudio", ""},
 		{"custom with merge no ffmpeg", "bestvideo+bestaudio", map[string]bool{}, "bestvideo+bestaudio", "ffmpeg not found"},
 	}
