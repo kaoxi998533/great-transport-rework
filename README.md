@@ -6,7 +6,7 @@ Minimal CLI to download from a YouTube channel or single video ID, then pass res
 - `yt-dlp` in `PATH`
 - `ffmpeg` recommended (improves format handling)
 - [`biliup` CLI](https://github.com/biliup/biliup) in `PATH` (only required for Bilibili uploads)
-  - Run `biliup login --user-cookie cookies.json` once to create upload credentials referenced by this tool.
+  - Run `biliup --user-cookie cookies.json login` once to create upload credentials referenced by this tool.
 
 ## Usage
 ```bash
@@ -35,9 +35,10 @@ touch cookies.json  # create locally if it does not exist
 docker run --rm -it \
   -v "$PWD/cookies.json:/app/cookies.json" \
   --entrypoint biliup yt-transfer \
-  login --user-cookie /app/cookies.json
+  --user-cookie /app/cookies.json login
 ```
 The uploader reads `/app/cookies.json` by default, so keep mounting that file for later runs.
+You can automate the setup with `./scripts/docker-biliup-login.sh`, which prepares `cookies.json` and launches the login flow so you can finish SMS/QR verification manually.
 
 ## Notes
 - Bilibili uploads execute the [`biliup`](https://github.com/biliup/biliup) CLI; install it and log in before running.

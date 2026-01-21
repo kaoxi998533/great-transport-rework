@@ -76,9 +76,6 @@ func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 	if format != "" {
 		baseArgs = append(baseArgs, "--format", format)
 	}
-	if HasExecutable("ffmpeg") {
-		baseArgs = append(baseArgs, "--merge-output-format", "mp4", "--recode-video", "mp4")
-	}
 	if d.sleep > 0 {
 		baseArgs = append(baseArgs,
 			fmt.Sprintf("--sleep-interval=%d", int(d.sleep.Seconds())),

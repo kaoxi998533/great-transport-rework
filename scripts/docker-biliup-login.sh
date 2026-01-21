@@ -12,4 +12,4 @@ docker run --rm -it \
   -v "$COOKIE_PATH:/app/cookies.json" \
   --entrypoint /bin/sh \
   "$IMAGE" \
-  -c 'python3 -m biliup login --user-cookie /app/cookies.json "$@"' sh "$@"
+  -c 'python3 -m biliup --user-cookie /app/cookies.json login "$@"' sh "$@"
