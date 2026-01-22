@@ -1,4 +1,6 @@
 downloads/
 *.mod
 *.db
-./cookies.json
+cookies.json
+*.mp4
+*.webm
