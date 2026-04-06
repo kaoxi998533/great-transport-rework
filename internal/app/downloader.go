@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +15,6 @@ import (
 )
 
 type Downloader interface {
-	ListChannelVideoIDs(ctx context.Context, channelURL string, limit int, jsRuntime string) ([]string, error)
 	DownloadVideo(ctx context.Context, videoURL, outputDir string, jsRuntime, format string) ([]string, error)
 }
 
@@ -27,42 +26,13 @@ func NewYtDlpDownloader(sleep time.Duration) *YtDlpDownloader {
 	return &YtDlpDownloader{sleep: sleep}
 }
 
-func (d *YtDlpDownloader) ListChannelVideoIDs(ctx context.Context, channelURL string, limit int, jsRuntime string) ([]string, error) {
-	if limit <= 0 {
-		return nil, fmt.Errorf("limit must be > 0")
-	}
-	args := []string{
-		"--quiet",
-		"--no-warnings",
-		"--flat-playlist",
-		"--print", "id",
-		"--playlist-items", fmt.Sprintf("1:%d", limit),
-		"--remote-components", "ejs:github",
-		channelURL,
-	}
-	if jsRuntime != "" {
-		args = append(args[:len(args)-1], "--js-runtimes", jsRuntime, channelURL)
-	}
-	lines, err := runYtDlpLines(ctx, args)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if line != "" {
-			ids = append(ids, line)
-		}
-	}
-	return ids, nil
-}
-
-// TODO: can return NA as path
 func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir string, jsRuntime, format string) ([]string, error) {
 	outputTemplate := filepath.Join(outputDir, "%(title)s.%(ext)s")
 	baseArgs := []string{
 		"--quiet",
 		"--no-warnings",
 		"--no-simulate",
+		"--no-check-certificates",
 		"--remote-components", "ejs:github",
 		"-o", outputTemplate,
 	}
@@ -77,6 +47,7 @@ func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 	if format != "" {
 		baseArgs = append(baseArgs, "--format", format)
 	}
+
 	if d.sleep > 0 {
 		baseArgs = append(baseArgs,
 			fmt.Sprintf("--sleep-interval=%d", int(d.sleep.Seconds())),
@@ -94,7 +65,7 @@ func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 
 	res, err := runWithExtras(nil)
 	if shouldRetryWithDynamic(res.stderr, err) {
-		log.Println("yt-dlp indicated SABR fallback; retrying with --allow-dynamic-mpd --concurrent-fragments 1")
+		slog.Warn("yt-dlp indicated SABR fallback, retrying with dynamic mpd")
 		res, err = runWithExtras([]string{"--allow-dynamic-mpd", "--concurrent-fragments", "1"})
 	}
 	if err != nil {
@@ -111,29 +82,27 @@ func (d *YtDlpDownloader) DownloadVideo(ctx context.Context, videoURL, outputDir
 	return files, nil
 }
 
-func runYtDlpLines(ctx context.Context, args []string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("yt-dlp failed: %w", err)
-	}
-	lines := []string{}
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines, nil
-}
-
 type ytDlpResult struct {
 	files  []string
 	stderr string
 }
 
+// ytDlpEnv returns the current environment with PYTHONIOENCODING=utf-8
+// to prevent mojibake in yt-dlp output on Windows (GBK console).
+func ytDlpEnv() []string {
+	env := os.Environ()
+	env = append(env, "PYTHONIOENCODING=utf-8")
+	return env
+}
+
 func runYtDlp(ctx context.Context, args []string) (ytDlpResult, error) {
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd.Env = ytDlpEnv()
+	// On Windows, cancel the process group so child processes are also killed.
+	cmd.Cancel = func() error {
+		return cmd.Process.Kill()
+	}
+	cmd.WaitDelay = 5 * time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ytDlpResult{}, err
@@ -162,10 +131,28 @@ func runYtDlp(ctx context.Context, args []string) (ytDlpResult, error) {
 	return ytDlpResult{files: files, stderr: stderrBuf.String()}, nil
 }
 
+func runYtDlpLines(ctx context.Context, args []string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd.Env = ytDlpEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("yt-dlp failed: %w", err)
+	}
+	lines := []string{}
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
 func resolveExistingFiles(ctx context.Context, videoURL, outputTemplate, jsRuntime, format string) ([]string, error) {
 	args := []string{
 		"--quiet",
 		"--no-warnings",
+		"--no-check-certificates",
 		"--no-download",
 		"--print", "filename",
 		"--remote-components", "ejs:github",

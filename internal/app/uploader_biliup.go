@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -16,6 +18,7 @@ type BiliupUploaderOptions struct {
 	CookiePath  string
 	Line        string
 	Limit       int
+	Title       string
 	TitlePrefix string
 	Description string
 	Dynamic     string
@@ -23,7 +26,10 @@ type BiliupUploaderOptions struct {
 }
 
 type BiliupUploader struct {
-	opts BiliupUploaderOptions
+	opts         BiliupUploaderOptions
+	overrideTitle string
+	overrideDesc  string
+	overrideTags  []string
 }
 
 func NewBiliupUploader(opts BiliupUploaderOptions) *BiliupUploader {
@@ -33,13 +39,34 @@ func NewBiliupUploader(opts BiliupUploaderOptions) *BiliupUploader {
 	return &BiliupUploader{opts: opts}
 }
 
+// SetVideoMeta sets per-video metadata overrides for the next upload.
+// The overrides are cleared after buildMetadata returns.
+func (u *BiliupUploader) SetVideoMeta(title, desc string, tags []string) {
+	u.overrideTitle = title
+	u.overrideDesc = desc
+	u.overrideTags = tags
+}
+
+// UploadResult contains the result of a successful upload.
+type UploadResult struct {
+	BilibiliBvid string // Bilibili video ID (e.g., BV1xx411x7xx)
+}
+
+// Upload uploads a video to Bilibili and returns the result including bvid.
+// This method is kept for backward compatibility.
 func (u *BiliupUploader) Upload(path string) error {
+	_, err := u.UploadWithResult(path)
+	return err
+}
+
+// UploadWithResult uploads a video and returns the upload result including bvid.
+func (u *BiliupUploader) UploadWithResult(path string) (*UploadResult, error) {
 	binary := u.opts.Binary
 	if binary == "" {
 		binary = "biliup"
 	}
 	if _, err := LookPath(binary); err != nil {
-		return fmt.Errorf("biliup binary %q not found in PATH; install it from github.com/biliup/biliup or set --biliup-binary", binary)
+		return nil, fmt.Errorf("biliup binary %q not found in PATH; install it from github.com/biliup/biliup or set --biliup-binary", binary)
 	}
 
 	cookie := u.opts.CookiePath
@@ -47,7 +74,7 @@ func (u *BiliupUploader) Upload(path string) error {
 		cookie = "cookies.json"
 	}
 	if err := ensureCookieExists(cookie); err != nil {
-		return err
+		return nil, err
 	}
 
 	meta := u.buildMetadata(path)
@@ -67,15 +94,57 @@ func (u *BiliupUploader) Upload(path string) error {
 		args = append(args, "--tag", meta.Tag)
 	}
 	args = append(args, path)
-	log.Println("Uploading the video at path:" + path)
+	slog.Info("uploading video", "path", path)
 
 	cmd := exec.Command(binary, args...)
-	cmd.Stdout = newPrefixedLogger("biliup")
-	cmd.Stderr = newPrefixedLogger("biliup")
+
+	// Capture stdout to parse bvid
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutWriter := io.MultiWriter(&stdoutBuf, newPrefixedLogger("biliup"))
+	stderrWriter := io.MultiWriter(&stderrBuf, newPrefixedLogger("biliup"))
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("biliup upload failed: %w", err)
+		return nil, fmt.Errorf("biliup upload failed: %w", err)
 	}
-	return nil
+
+	// Parse bvid from output
+	result := &UploadResult{}
+	output := stdoutBuf.String() + stderrBuf.String()
+	result.BilibiliBvid = parseBvidFromOutput(output)
+
+	if result.BilibiliBvid != "" {
+		slog.Info("upload successful", "bvid", result.BilibiliBvid)
+	} else {
+		slog.Warn("upload successful, but could not parse bvid from output")
+	}
+
+	return result, nil
+}
+
+// parseBvidFromOutput extracts the Bilibili video ID from biliup output.
+// biliup typically outputs lines like: "bvid: BV1xx411x7xx" or contains the bvid in the response.
+func parseBvidFromOutput(output string) string {
+	// Pattern 1: Direct bvid output (e.g., "bvid: BV1xx411x7xx" or "bvid=BV1xx411x7xx")
+	bvidPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`[Bb][Vv][Ii][Dd][:\s=]+([Bb][Vv][0-9a-zA-Z]+)`),
+		regexp.MustCompile(`"bvid"\s*:\s*"([Bb][Vv][0-9a-zA-Z]+)"`),
+		regexp.MustCompile(`'bvid'\s*:\s*'([Bb][Vv][0-9a-zA-Z]+)'`),
+		// Pattern for URL containing bvid
+		regexp.MustCompile(`bilibili\.com/video/([Bb][Vv][0-9a-zA-Z]+)`),
+		// Standalone BV pattern (less reliable, used as fallback)
+		regexp.MustCompile(`\b([Bb][Vv]1[0-9a-zA-Z]{9})\b`),
+	}
+
+	for _, pattern := range bvidPatterns {
+		matches := pattern.FindStringSubmatch(output)
+		if len(matches) >= 2 {
+			return matches[1]
+		}
+	}
+
+	return ""
 }
 
 func ensureCookieExists(path string) error {
@@ -99,26 +168,51 @@ type biliupMetadata struct {
 }
 
 func (u *BiliupUploader) buildMetadata(path string) biliupMetadata {
-	base := filepath.Base(path)
-	name := strings.TrimSuffix(base, filepath.Ext(base))
-	if strings.TrimSpace(name) == "" {
-		name = base
-	}
-	title := strings.TrimSpace(u.opts.TitlePrefix + name)
-	if title == "" {
-		title = name
+	// Clear overrides after this call (deferred so they're available during the method)
+	defer func() {
+		u.overrideTitle = ""
+		u.overrideDesc = ""
+		u.overrideTags = nil
+	}()
+
+	var title string
+	if u.overrideTitle != "" {
+		title = u.overrideTitle
+	} else if u.opts.Title != "" {
+		title = u.opts.Title
+	} else {
+		base := filepath.Base(path)
+		name := strings.TrimSuffix(base, filepath.Ext(base))
+		if strings.TrimSpace(name) == "" {
+			name = base
+		}
+		title = strings.TrimSpace(u.opts.TitlePrefix + name)
+		if title == "" {
+			title = name
+		}
 	}
 
-	desc := strings.TrimSpace(u.opts.Description)
-	if desc == "" {
-		desc = fmt.Sprintf("Uploaded automatically: %s", title)
+	var desc string
+	if u.overrideDesc != "" {
+		desc = u.overrideDesc
+	} else {
+		desc = strings.TrimSpace(u.opts.Description)
+		if desc == "" {
+			desc = fmt.Sprintf("Uploaded automatically: %s", title)
+		}
 	}
+
 	dynamic := strings.TrimSpace(u.opts.Dynamic)
 	if dynamic == "" {
 		dynamic = desc
 	}
 
-	tag := strings.Join(filterEmpty(u.opts.Tags), ",")
+	var tag string
+	if u.overrideTags != nil {
+		tag = strings.Join(filterEmpty(u.overrideTags), ",")
+	} else {
+		tag = strings.Join(filterEmpty(u.opts.Tags), ",")
+	}
 
 	return biliupMetadata{
 		Title:       title,
@@ -152,7 +246,7 @@ func (p *prefixedLogger) Write(data []byte) (int, error) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			log.Printf("[%s] %s", p.prefix, line)
+			slog.Debug("subprocess output", "source", p.prefix, "line", line)
 		}
 	}
 	return len(data), nil

@@ -6,10 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"great_transport/internal/app"
@@ -38,9 +41,13 @@ type config struct {
 	biliupLine   string
 	biliupLimit  int
 	biliupTags   string
-	biliupTitle  string
-	biliupDesc   string
-	biliupDynamic string
+	biliupTitle       string
+	biliupTitlePrefix string
+	biliupDesc        string
+	biliupDynamic  string
+	mlServiceDir   string
+	llmBackend     string
+	logLevel       string
 }
 
 type dummyUploader struct {
@@ -48,7 +55,7 @@ type dummyUploader struct {
 }
 
 func (u dummyUploader) Upload(path string) error {
-	log.Printf("stub upload to %s: %s", u.platform, path)
+	slog.Info("stub upload", "platform", u.platform, "path", path)
 	return nil
 }
 
@@ -59,6 +66,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	app.SetupLogger(cfg.logLevel)
 
 	if _, err := app.LookPath("yt-dlp"); err != nil {
 		log.Fatal("yt-dlp not found in PATH; install it first (see README for Docker setup)")
@@ -73,11 +82,11 @@ func main() {
 		log.Fatal(err)
 	}
 	if jsWarn != "" {
-		log.Println(jsWarn)
+		slog.Warn(jsWarn)
 	}
 	format, warn := determineFormat(cfg.format)
 	if warn != "" {
-		log.Println(warn)
+		slog.Warn(warn)
 	}
 
 	ctx := context.Background()
@@ -88,7 +97,7 @@ func main() {
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Fatal(err)
 	}
-	log.Println("Initialized database")
+	slog.Info("initialized database", "path", cfg.dbPath)
 
 	downloader := app.NewYtDlpDownloader(time.Duration(cfg.sleepSeconds) * time.Second)
 	uploader, err := newUploaderFromConfig(cfg)
@@ -103,28 +112,36 @@ func main() {
 		JSRuntime:  jsRuntime,
 		Format:     format,
 	}
-	log.Println("Initialized controller")
+	slog.Info("initialized controller", "output_dir", cfg.outputDir, "platform", cfg.platform)
 
 	if cfg.httpAddr != "" {
-		if err := app.ServeHTTP(cfg.httpAddr, controller); err != nil {
+		// Graceful shutdown context
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		queue := app.NewJobQueue(controller, store, app.SubtitleOptions{
+			MLServiceDir: cfg.mlServiceDir,
+			LLMBackend:   cfg.llmBackend,
+		})
+		queue.Start(ctx)
+		slog.Info("job queue started")
+
+		if err := app.ServeHTTP(cfg.httpAddr, controller, queue); err != nil {
 			log.Fatal(err)
 		}
-		log.Println("Server is initialized")
+		slog.Info("server initialized", "addr", cfg.httpAddr)
 		return
 	}
 
-	log.Println("Handling downloading")
+	// Handle sync modes
+	slog.Info("handling download", "video_id", cfg.videoID)
 	switch {
-	case cfg.channelID != "":
-		if _, err := controller.SyncChannel(ctx, cfg.channelID, cfg.limit); err != nil {
-			log.Fatal(err)
-		}
 	case cfg.videoID != "":
 		if err := controller.SyncVideo(ctx, cfg.videoID); err != nil {
 			log.Fatal(err)
 		}
 	default:
-		log.Fatal("no channel or video provided; use --http-addr for server mode")
+		log.Fatal("no video provided; use --http-addr for server mode")
 	}
 }
 
@@ -136,7 +153,8 @@ func newUploaderFromConfig(cfg config) (app.Uploader, error) {
 			CookiePath:  cfg.biliupCookie,
 			Line:        cfg.biliupLine,
 			Limit:       cfg.biliupLimit,
-			TitlePrefix: cfg.biliupTitle,
+			Title:       cfg.biliupTitle,
+			TitlePrefix: cfg.biliupTitlePrefix,
 			Description: cfg.biliupDesc,
 			Dynamic:     cfg.biliupDynamic,
 			Tags:        parseCSVList(cfg.biliupTags),
@@ -167,13 +185,11 @@ func parseFlags() (config, error) {
 
 func parseFlagsFrom(fs *flag.FlagSet, args []string) (config, error) {
 	var cfg config
-	fs.StringVar(&cfg.channelID, "channel-id", "", "YouTube channel ID or URL")
 	fs.StringVar(&cfg.videoID, "video-id", "", "YouTube video ID or URL")
 	fs.StringVar(&cfg.platform, "platform", "bilibili", "target platform (bilibili or tiktok)")
 	fs.StringVar(&cfg.outputDir, "output", "downloads", "output directory")
 	fs.StringVar(&cfg.dbPath, "db-path", "metadata.db", "path to sqlite metadata database")
-	fs.StringVar(&cfg.httpAddr, "http-addr", "", "HTTP listen address (enables controller server mode)")
-	fs.IntVar(&cfg.limit, "limit", 5, "max videos to download for channel")
+	fs.StringVar(&cfg.httpAddr, "http-addr", "", "HTTP listen address (enables server mode)")
 	fs.IntVar(&cfg.sleepSeconds, "sleep-seconds", 5, "sleep seconds between downloads")
 	fs.StringVar(&cfg.jsRuntime, "js-runtime", "auto", "JS runtime passed to yt-dlp (auto,node,deno,...)")
 	fs.StringVar(&cfg.format, "format", "auto", "yt-dlp format selector (auto prefers mp4 when available)")
@@ -182,21 +198,20 @@ func parseFlagsFrom(fs *flag.FlagSet, args []string) (config, error) {
 	fs.StringVar(&cfg.biliupLine, "biliup-line", "", "optional biliup upload line override (ws/qn/bda2/...)")
 	fs.IntVar(&cfg.biliupLimit, "biliup-limit", 3, "per-file biliup upload concurrency limit")
 	fs.StringVar(&cfg.biliupTags, "biliup-tags", "", "comma-separated biliup tags")
-	fs.StringVar(&cfg.biliupTitle, "biliup-title-prefix", "", "prefix prepended to derived biliup video titles")
+	fs.StringVar(&cfg.biliupTitle, "biliup-title", "", "full title override for biliup upload (overrides filename-based title)")
+	fs.StringVar(&cfg.biliupTitlePrefix, "biliup-title-prefix", "", "prefix prepended to derived biliup video titles")
 	fs.StringVar(&cfg.biliupDesc, "biliup-desc", "Uploaded via yt-transfer", "description text template for biliup uploads")
 	fs.StringVar(&cfg.biliupDynamic, "biliup-dynamic", "", "dynamic/status text for biliup uploads (defaults to description)")
+	fs.StringVar(&cfg.mlServiceDir, "ml-service-dir", "", "path to ml-service directory (enables annotation generation)")
+	fs.StringVar(&cfg.llmBackend, "llm-backend", "ollama", "LLM backend for annotations (ollama, openai, anthropic)")
+	fs.StringVar(&cfg.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
+
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
 
-	if cfg.httpAddr == "" && cfg.channelID == "" && cfg.videoID == "" {
-		return cfg, errors.New("provide either --channel-id or --video-id")
-	}
-	if cfg.httpAddr == "" && cfg.channelID != "" && cfg.videoID != "" {
-		return cfg, errors.New("provide only one of --channel-id or --video-id")
-	}
-	if cfg.channelID != "" && cfg.limit <= 0 {
-		return cfg, errors.New("--limit must be > 0 for channel downloads")
+	if cfg.httpAddr == "" && cfg.videoID == "" {
+		return cfg, errors.New("provide --video-id or --http-addr for server mode")
 	}
 	if cfg.sleepSeconds < 0 {
 		return cfg, errors.New("--sleep-seconds must be >= 0")
